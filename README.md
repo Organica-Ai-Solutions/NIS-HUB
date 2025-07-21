@@ -1,6 +1,8 @@
 # 🧠 NIS HUB – Central Intelligence for Neuro-Inspired AI Systems
 
-![NIS HUB Logo](assets/logo.png)
+<div align="center">
+  <img src="assets/images/nishub.png" alt="NIS HUB Logo" width="400">
+</div>
 
 **NIS HUB is the core coordination system that unifies all distributed deployments of the NIS Protocol** — a neuro-inspired architecture for cognitive AI agents. Acting as the central nervous system, the NIS HUB connects autonomous subsystems such as:
 
