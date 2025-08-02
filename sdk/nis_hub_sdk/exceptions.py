@@ -45,4 +45,19 @@ class ConfigurationError(NISHubError):
 
 class ValidationError(NISHubError):
     """Raised when data validation fails."""
+    pass
+
+
+class NISProtocolError(NISHubError):
+    """Raised when protocol operations fail."""
+    pass
+
+
+class NISConnectionError(ConnectionError):
+    """Raised when connection to external protocol fails."""
+    pass
+
+
+class NISValidationError(ValidationError):
+    """Raised when NIS validation fails for external protocol messages."""
     pass 

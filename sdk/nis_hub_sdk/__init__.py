@@ -24,6 +24,13 @@ from .client import NISNode
 from .memory import MemoryManager
 from .missions import MissionCoordinator
 from .config import HubConfig
+from .protocol import (
+    ProtocolBridge,
+    ProtocolType,
+    MessageType,
+    UrgencyLevel,
+    ToolType
+)
 from .exceptions import (
     NISHubError,
     ConnectionError,
@@ -31,7 +38,8 @@ from .exceptions import (
     RegistrationError,
     HeartbeatError,
     MemoryError,
-    MissionError
+    MissionError,
+    NISProtocolError
 )
 
 __all__ = [
@@ -41,6 +49,13 @@ __all__ = [
     "MissionCoordinator",
     "HubConfig",
     
+    # Protocol Integration
+    "ProtocolBridge",
+    "ProtocolType",
+    "MessageType",
+    "UrgencyLevel",
+    "ToolType",
+    
     # Exceptions
     "NISHubError",
     "ConnectionError",
@@ -49,6 +64,7 @@ __all__ = [
     "HeartbeatError",
     "MemoryError",
     "MissionError",
+    "NISProtocolError",
     
     # Version info
     "__version__",
