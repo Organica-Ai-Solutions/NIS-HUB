@@ -109,6 +109,10 @@ class ProtocolBridgeService:
         self.active_bridges: Dict[str, Dict[str, Any]] = {}
         self.message_queue: Dict[str, List[ProtocolMessage]] = {}
         
+        # NIS Protocol v3.2.0 base system connection
+        self.nis_base_connection = None
+        self.nis_base_capabilities = {}
+        
         # Protocol compatibility matrix
         self.compatibility_matrix = self._initialize_compatibility_matrix()
         
@@ -117,8 +121,9 @@ class ProtocolBridgeService:
         
         logger.info("🌉 Protocol Bridge Service initialized")
         
-        # Initialize protocol handlers
+        # Initialize protocol handlers and NIS base connection
         asyncio.create_task(self._initialize_protocol_handlers())
+        asyncio.create_task(self._auto_connect_nis_base())
     
     async def register_external_protocol(self, 
                                        protocol: ExternalProtocol,
@@ -425,14 +430,293 @@ class ProtocolBridgeService:
                 return {"error": "Bridge not found"}
             return self.active_bridges[bridge_id]
         else:
-            return {
+            status = {
                 "active_bridges": len(self.active_bridges),
                 "supported_protocols": [p.value for p in ExternalProtocol],
                 "total_messages": sum(len(queue) for queue in self.message_queue.values()),
                 "bridges": {bid: {"protocol": config["protocol"], "status": config["status"], 
                                 "message_count": config["message_count"]} 
-                           for bid, config in self.active_bridges.items()}
+                           for bid, config in self.active_bridges.items()},
+                "nis_base_connection": {
+                    "connected": self.nis_base_connection is not None,
+                    "capabilities": self.nis_base_capabilities
+                }
             }
+            return status
+    
+    # NIS Protocol v3.2.0 Base System Integration Methods
+    
+    async def connect_to_nis_base(self, base_url: str = "http://localhost:8000") -> Dict[str, Any]:
+        """Connect to the running NIS Protocol v3.2.0 base system."""
+        try:
+            import httpx
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Test main connection
+                health_response = await client.get(f"{base_url}/health")
+                if health_response.status_code != 200:
+                    return {"status": "error", "message": f"Health check failed: {health_response.status_code}"}
+                
+                health_data = health_response.json()
+                
+                # Get system capabilities
+                system_response = await client.get(f"{base_url}/")
+                system_data = system_response.json() if system_response.status_code == 200 else {}
+                
+                # Get multimodal capabilities  
+                multimodal_response = await client.get(f"{base_url}/agents/multimodal/status")
+                multimodal_data = multimodal_response.json() if multimodal_response.status_code == 200 else {}
+                
+                self.nis_base_connection = {
+                    "url": base_url,
+                    "connected_at": datetime.utcnow().isoformat(),
+                    "status": "connected",
+                    "health": health_data,
+                    "system_info": system_data,
+                    "multimodal_capabilities": multimodal_data
+                }
+                
+                self.nis_base_capabilities = {
+                    "version": system_data.get("version", "unknown"),
+                    "pattern": system_data.get("pattern", "unknown"), 
+                    "providers": health_data.get("provider", []),
+                    "features": system_data.get("features", []),
+                    "pipeline_features": system_data.get("pipeline_features", []),
+                    "endpoints": system_data.get("demo_interfaces", {}),
+                    "multimodal_agents": list(multimodal_data.get("multimodal_capabilities", {}).keys())
+                }
+                
+                logger.info(f"Successfully connected to NIS Protocol v{system_data.get('version', 'unknown')} at {base_url}")
+                
+                return {
+                    "status": "success",
+                    "version": system_data.get("version"),
+                    "capabilities": self.nis_base_capabilities,
+                    "endpoints": len(system_data.get("demo_interfaces", {}))
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to connect to NIS base system: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def send_to_nis_base(self, endpoint: str, data: Dict[str, Any], method: str = "POST") -> Dict[str, Any]:
+        """Send request to NIS Protocol v3.2.0 base system with automatic reconnection."""
+        # Check connection and attempt auto-reconnect if needed
+        if not self.nis_base_connection:
+            logger.warning("No NIS base connection - attempting auto-reconnect...")
+            reconnect_result = await self._auto_connect_nis_base()
+            if not self.nis_base_connection:
+                return {"status": "error", "message": "Not connected to NIS base system and auto-reconnect failed"}
+        
+        try:
+            import httpx
+            
+            base_url = self.nis_base_connection["url"]
+            
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                if endpoint.startswith('/'):
+                    url = f"{base_url}{endpoint}"
+                else:
+                    url = f"{base_url}/{endpoint}"
+                
+                # Choose the right HTTP method
+                if method.upper() == "POST":
+                    response = await client.post(url, json=data, headers={"Content-Type": "application/json"})
+                elif method.upper() == "GET":
+                    response = await client.get(url, params=data)
+                else:
+                    # Default to POST for most endpoints
+                    response = await client.post(url, json=data, headers={"Content-Type": "application/json"})
+                
+                if response.status_code == 200:
+                    try:
+                        response_data = response.json()
+                        return {
+                            "status": "success",
+                            "data": response_data,
+                            "response_time": response.elapsed.total_seconds() if hasattr(response, 'elapsed') else None
+                        }
+                    except:
+                        # Handle non-JSON responses
+                        return {
+                            "status": "success",
+                            "data": {"content": response.text},
+                            "response_time": response.elapsed.total_seconds() if hasattr(response, 'elapsed') else None
+                        }
+                else:
+                    # Check if it's a connection issue and try to reconnect
+                    if response.status_code in [502, 503, 504]:
+                        logger.warning(f"NIS base system connection issue ({response.status_code}) - attempting reconnect...")
+                        self.nis_base_connection = None  # Clear bad connection
+                        reconnect_result = await self._auto_connect_nis_base()
+                        if self.nis_base_connection:
+                            # Retry the request once after reconnection
+                            return await self.send_to_nis_base(endpoint, data, method)
+                    
+                    error_text = response.text
+                    try:
+                        error_json = response.json()
+                        error_message = error_json.get("detail", error_text)
+                    except:
+                        error_message = error_text
+                    
+                    return {
+                        "status": "error", 
+                        "message": f"HTTP {response.status_code}: {error_message}",
+                        "status_code": response.status_code
+                    }
+                    
+        except Exception as e:
+            # Check if it's a connection error and try to reconnect
+            if "Connection" in str(e) or "timeout" in str(e).lower():
+                logger.warning(f"NIS base system connection error ({e}) - attempting reconnect...")
+                self.nis_base_connection = None  # Clear bad connection
+                reconnect_result = await self._auto_connect_nis_base()
+                if self.nis_base_connection:
+                    # Retry the request once after reconnection
+                    return await self.send_to_nis_base(endpoint, data, method)
+            
+            logger.error(f"Error sending to NIS base system: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def vision_analysis_via_nis_base(self, image_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Use NIS Protocol v3.2.0 vision analysis capabilities."""
+        # Format request to match ImageAnalysisRequest model
+        vision_request = {
+            "image_data": image_data.get("image_data", ""),
+            "analysis_type": image_data.get("analysis_type", "comprehensive"),
+            "provider": image_data.get("provider", "auto"),
+            "context": image_data.get("context", None)
+        }
+        return await self.send_to_nis_base("/vision/analyze", vision_request)
+    
+    async def deep_research_via_nis_base(self, query: str, sources: List[str] = None) -> Dict[str, Any]:
+        """Use NIS Protocol v3.2.0 deep research capabilities."""
+        # Format request to match ResearchRequest model
+        research_data = {
+            "query": query,
+            "research_depth": "comprehensive",
+            "source_types": sources or ["arxiv", "semantic_scholar", "wikipedia"],
+            "time_limit": 300,
+            "min_sources": 5
+        }
+        return await self.send_to_nis_base("/research/deep", research_data)
+    
+    async def collaborative_reasoning_via_nis_base(self, problem: str, reasoning_type: str = "analytical") -> Dict[str, Any]:
+        """Use NIS Protocol v3.2.0 collaborative reasoning."""
+        # Format request to match ReasoningRequest model
+        reasoning_data = {
+            "problem": problem,
+            "reasoning_type": reasoning_type,
+            "depth": "comprehensive",
+            "require_consensus": True,
+            "max_iterations": 3
+        }
+        return await self.send_to_nis_base("/reasoning/collaborative", reasoning_data)
+    
+    async def enhanced_chat_via_nis_base(self, message: str, agent_type: str = "consciousness", user_id: str = "nis-hub") -> Dict[str, Any]:
+        """Use NIS Protocol v3.2.0 chat capabilities with proper request format."""
+        # Use the POST /chat endpoint with proper ChatRequest format
+        chat_data = {
+            "message": message,
+            "user_id": user_id,
+            "conversation_id": None,
+            "context": None,
+            "agent_type": agent_type,
+            "provider": None,
+            "output_mode": "technical",
+            "audience_level": "expert",
+            "include_visuals": False,
+            "show_confidence": True,
+            "enable_caching": True,
+            "priority": "normal",
+            "consensus_mode": None,
+            "consensus_providers": None,
+            "max_cost": 0.10,
+            "user_preference": "balanced"
+        }
+        return await self.send_to_nis_base("/chat", chat_data)
+    
+    async def check_connection_health(self) -> bool:
+        """Check if the NIS base connection is healthy."""
+        if not self.nis_base_connection:
+            return False
+        
+        try:
+            import httpx
+            base_url = self.nis_base_connection["url"]
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{base_url}/health")
+                return response.status_code == 200
+        except:
+            return False
+    
+    async def get_nis_base_status(self) -> Dict[str, Any]:
+        """Get detailed status of NIS Protocol v3.2.0 base system with auto-reconnect."""
+        # First check if we have a connection
+        if not self.nis_base_connection:
+            # Try auto-reconnect
+            logger.info("No NIS base connection found - attempting auto-reconnect...")
+            await self._auto_connect_nis_base()
+            
+            if not self.nis_base_connection:
+                return {"status": "disconnected", "message": "Not connected to NIS base system"}
+        
+        # Check connection health
+        connection_healthy = await self.check_connection_health()
+        if not connection_healthy:
+            logger.warning("NIS base connection unhealthy - attempting reconnect...")
+            self.nis_base_connection = None
+            await self._auto_connect_nis_base()
+            
+            if not self.nis_base_connection:
+                return {"status": "disconnected", "message": "Connection lost and reconnection failed"}
+        
+        # Perform fresh health check
+        try:
+            result = await self.send_to_nis_base("/health", {}, method="GET")
+            if result["status"] == "success":
+                health_data = result["data"]
+                
+                # Get multimodal status
+                multimodal_result = await self.send_to_nis_base("/agents/multimodal/status", {}, method="GET")
+                multimodal_data = multimodal_result.get("data", {}) if multimodal_result["status"] == "success" else {}
+                
+                return {
+                    "status": "connected",
+                    "connection_info": self.nis_base_connection,
+                    "current_health": health_data,
+                    "multimodal_status": multimodal_data,
+                    "capabilities": self.nis_base_capabilities,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            else:
+                return {"status": "unhealthy", "error": result.get("message", "Unknown error")}
+                
+        except Exception as e:
+            logger.error(f"Error checking NIS base status: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def _auto_connect_nis_base(self):
+        """Automatically connect to local NIS Protocol v3.2.0 instance."""
+        try:
+            # Try common local URLs
+            local_urls = [
+                "http://localhost:8000",
+                "http://localhost",
+                "http://127.0.0.1:8000"
+            ]
+            
+            for url in local_urls:
+                result = await self.connect_to_nis_base(url)
+                if result["status"] == "success":
+                    logger.info(f"Auto-connected to NIS Protocol base at {url}")
+                    return
+            
+            logger.warning("Could not auto-connect to local NIS Protocol instance")
+            
+        except Exception as e:
+            logger.error(f"Error in auto-connect to NIS base: {e}")
     
     # Private helper methods
     

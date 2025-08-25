@@ -49,6 +49,51 @@ class RedisService:
         
         self.logger = NISHubLogger("redis_service")
         
+    async def get_node_count(self) -> int:
+        """Get count of registered nodes."""
+        try:
+            if self.redis:
+                keys = await self.redis.keys("node:*")
+                return len(keys)
+            return 0
+        except Exception as e:
+            self.logger.error(f"Error getting node count: {e}")
+            return 0
+    
+    async def get_mission_count(self) -> int:
+        """Get count of active missions."""
+        try:
+            if self.redis:
+                keys = await self.redis.keys("mission:*")
+                return len(keys)
+            return 0
+        except Exception as e:
+            self.logger.error(f"Error getting mission count: {e}")
+            return 0
+    
+    async def get_memory_size(self) -> str:
+        """Get total memory size used."""
+        try:
+            if self.redis:
+                keys = await self.redis.keys("memory:*")
+                total_size = 0
+                for key in keys:
+                    size = await self.redis.memory_usage(key)
+                    if size:
+                        total_size += size
+                
+                # Convert to human readable format
+                if total_size < 1024:
+                    return f"{total_size}B"
+                elif total_size < 1024 * 1024:
+                    return f"{total_size/1024:.1f}KB"
+                else:
+                    return f"{total_size/(1024*1024):.1f}MB"
+            return "0B"
+        except Exception as e:
+            self.logger.error(f"Error getting memory size: {e}")
+            return "0B"
+        
         # Key prefixes for different data types
         self.PREFIXES = {
             "node": "nis:node:",
